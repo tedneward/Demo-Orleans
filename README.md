@@ -6,3 +6,6 @@ A collection of Microsoft Orleans demos to go along with my presentations.
 ## HelloWorld
 Exactly what it sounds like: HelloWorld, for Orleans. Simplest Orleans program possible.
 
+## Chirper
+This is the first of what will likely be many Twitter clones, inspired by the Orleans sample of the same name. Updated for .NET 6 and Orleans 3.0.
+
