@@ -156,6 +156,18 @@ namespace Chirper.Client
                         }
                     }
                 }
+                else if (command.StartsWith("/pull"))
+                {
+                    if (EnsureActiveAccount())
+                    {
+                        (await _account.GetReceivedMessagesAsync())
+                            .ForEach(_ => Console.WriteLine(_));
+                    }
+                    else
+                    {
+                        Console.WriteLine("Select an active user to pull messages.");
+                    }
+                }
                 else
                 {
                     Console.WriteLine("Unknown command. Type /help for list of commands.");
@@ -196,6 +208,7 @@ namespace Chirper.Client
 
             Console.WriteLine("/help: Shows this list.");
             Console.WriteLine("/user <username>: Acts as the given account.");
+            Console.WriteLine("/pull: Retrieve all messages from chirpers this account follows.");
             Console.WriteLine("/chirp <message>: Publishes a message to the active account.");
             Console.WriteLine("/follow <username>: Makes the active account follows the given account.");
             Console.WriteLine("/unfollow <username>: Makes the active account unfollow the given accout.");
