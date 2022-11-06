@@ -160,8 +160,22 @@ namespace Chirper.Client
                 {
                     if (EnsureActiveAccount())
                     {
-                        (await _account.GetReceivedMessagesAsync())
-                            .ForEach(_ => Console.WriteLine(_));
+                        if (command.Length > 5)
+                        {
+                            // There's a number behind the command, e.g, "/pull 10"
+                            var match = Regex.Match(command, @"/pull (?<chirps>\w{1,100})");
+                            var num = 0;
+                            if (Int32.TryParse(match.Groups["chirps"].Value, out num))
+                            {
+                                (await _account.GetReceivedMessagesAsync(num))
+                                    .ForEach(_ => Console.WriteLine(_));
+                            }
+                        }
+                        else
+                        {
+                            (await _account.GetReceivedMessagesAsync(-1))
+                                .ForEach(_ => Console.WriteLine(_));
+                        }
                     }
                     else
                     {
@@ -208,7 +222,7 @@ namespace Chirper.Client
 
             Console.WriteLine("/help: Shows this list.");
             Console.WriteLine("/user <username>: Acts as the given account.");
-            Console.WriteLine("/pull: Retrieve all messages from chirpers this account follows.");
+            Console.WriteLine("/pull {chirpsnum}: Retrieve all (or {chirpsnum}) messages from chirpers this account follows.");
             Console.WriteLine("/chirp <message>: Publishes a message to the active account.");
             Console.WriteLine("/follow <username>: Makes the active account follows the given account.");
             Console.WriteLine("/unfollow <username>: Makes the active account unfollow the given accout.");
