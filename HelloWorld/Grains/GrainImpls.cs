@@ -13,7 +13,8 @@ public class HelloWorld : Orleans.Grain, IHelloWorld
 
     public Task<string> SayHello(string name)
     {
-        _logger.LogInformation("SayHello: name = '{name}'", name);
+        _logger.LogInformation("SayHello: name = '{name}', ", name);
+
         return Task.FromResult($"Hello, {name}, welcome to Orleans");
     }
 }
