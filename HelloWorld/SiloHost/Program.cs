@@ -1,10 +1,6 @@
 ﻿using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Orleans;
 using Orleans.Configuration;
-using Orleans.Hosting;
-
-using Grains;
 
 try
 {
@@ -33,8 +29,6 @@ static async Task<IHost> StartSiloAsync()
                 options.ClusterId = "dev";
                 options.ServiceId = "HelloWorld";
             })
-            .ConfigureApplicationParts(
-                parts => parts.AddApplicationPart(typeof(HelloWorld).Assembly).WithReferences())
             .ConfigureLogging(logging => logging.AddConsole());
         });
 

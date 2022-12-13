@@ -1,16 +1,15 @@
-﻿using Microsoft.Extensions.Logging;
-using Orleans;
+﻿using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Orleans.Configuration;
 
 using GrainInterfaces;
 
 try
 {
-    using (var client = await ConnectClientAsync())
-    {
-        await DoClientWorkAsync(client);
-        Console.ReadKey();
-    }
+    var client = await ConnectClientAsync();
+    await DoClientWorkAsync(client);
+    Console.ReadKey();
 
     return 0;
 }
@@ -25,20 +24,22 @@ catch (Exception e)
 
 static async Task<IClusterClient> ConnectClientAsync()
 {
-    var client = new ClientBuilder()
-        .UseLocalhostClustering()
-        .Configure<ClusterOptions>(options =>
-        {
-            options.ClusterId = "dev";
-            options.ServiceId = "HelloWorld";
+    var host = new HostBuilder()
+        .UseOrleansClient(c => {
+            c.UseLocalhostClustering()
+            .Configure<ClusterOptions>(options =>
+            {
+                options.ClusterId = "dev";
+                options.ServiceId = "HelloWorld";
+            });
         })
         .ConfigureLogging(logging => logging.AddConsole())
         .Build();
+    await host.StartAsync();
 
-    await client.Connect();
     Console.WriteLine("Client successfully connected to silo host \n");
 
-    return client;
+    return host.Services.GetRequiredService<IClusterClient>();
 }
 
 static async Task DoClientWorkAsync(IClusterClient client)
