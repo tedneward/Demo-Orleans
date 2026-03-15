@@ -1,12 +1,6 @@
-using Orleans.Concurrency;
-using System;
+namespace AdventureGrainInterfaces;
 
-namespace AdventureGrainInterfaces
-{
-    [Immutable]
-    public class PlayerInfo
-    {
-        public Guid Key { get; set; }
-        public string Name { get; set; }
-    }
-}
+[GenerateSerializer, Immutable]
+public record class PlayerInfo(
+    Guid Key,
+    string? Name);

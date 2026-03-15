@@ -1,65 +1,51 @@
-﻿using AdventureGrainInterfaces;
-using Orleans;
-using System;
-using System.Net;
-using Orleans.Runtime;
-using Microsoft.Extensions.Logging;
-using Orleans.Configuration;
+using AdventureGrainInterfaces;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
-namespace AdventureClient
+using var host = Host.CreateDefaultBuilder(args)
+    .UseOrleansClient(clientBuilder =>
+        clientBuilder.UseLocalhostClustering())
+    .Build();
+
+await host.StartAsync();
+
+Console.WriteLine("""
+     ______      __                         __                           
+    /\  _  \    /\ \                       /\ \__                        
+    \ \ \L\ \   \_\ \  __  __     __    ___\ \ ,_\  __  __  _ __    __   
+     \ \  __ \  /'_` \/\ \/\ \  /'__`\/' _ `\ \ \/ /\ \/\ \/\`'__\/'__`\ 
+      \ \ \/\ \/\ \L\ \ \ \_/ |/\  __//\ \/\ \ \ \_\ \ \_\ \ \ \//\  __/ 
+       \ \_\ \_\ \___,_\ \___/ \ \____\ \_\ \_\ \__\\ \____/\ \_\\ \____\
+        \/_/\/_/\/__,_ /\/__/   \/____/\/_/\/_/\/__/ \/___/  \/_/ \/____/
+    """);
+
+Console.WriteLine();
+Console.WriteLine("What's your name?");
+var name = Console.ReadLine()!;
+
+var client = host.Services.GetRequiredService<IClusterClient>();
+var player = client.GetGrain<IPlayerGrain>(Guid.NewGuid());
+await player.SetName(name);
+
+var room1 = client.GetGrain<IRoomGrain>(0);
+await player.SetRoomGrain(room1);
+
+Console.WriteLine(await player.Play("look"));
+
+var result = "Start";
+try
 {
-    class Program
+    while (result is not "")
     {
-        static void Main(string[] args)
-        {
-            var client = new ClientBuilder()
-                .UseLocalhostClustering()
-                .Configure<ClusterOptions>(options =>
-                {
-                    options.ClusterId = "dev";
-                    options.ServiceId = "AdventureApp";
-                })
-                .ConfigureApplicationParts(parts => parts.AddApplicationPart(typeof(IRoomGrain).Assembly).WithReferences())
-                .Build();
+        var command = Console.ReadLine()!;
 
-            client.Connect().Wait();
-
-            Console.WriteLine(@"
-  ___      _                 _                  
- / _ \    | |               | |                 
-/ /_\ \ __| |_   _____ _ __ | |_ _   _ _ __ ___ 
-|  _  |/ _` \ \ / / _ \ '_ \| __| | | | '__/ _ \
-| | | | (_| |\ V /  __/ | | | |_| |_| | | |  __/
-\_| |_/\__,_| \_/ \___|_| |_|\__|\__,_|_|  \___|");
-
-            Console.WriteLine();
-            Console.WriteLine("What's your name?");
-            string name = Console.ReadLine();
-
-            var player = client.GetGrain<IPlayerGrain>(Guid.NewGuid());
-            player.SetName(name).Wait();
-            var room1 = client.GetGrain<IRoomGrain>(0);
-            player.SetRoomGrain(room1).Wait();
-
-            Console.WriteLine(player.Play("look").Result);
-
-            string result = "Start";
-
-            try
-            {
-                while (result != "")
-                {
-                    string command = Console.ReadLine();
-
-                    result = player.Play(command).Result;
-                    Console.WriteLine(result);
-                }
-            }
-            finally
-            {
-                player.Die().Wait();
-                Console.WriteLine("Game over!");
-            }
-        }
+        result = await player.Play(command);
+        Console.WriteLine(result);
     }
+}
+finally
+{
+    await player.Die();
+    Console.WriteLine("Game over!");
+    await host.StopAsync();
 }

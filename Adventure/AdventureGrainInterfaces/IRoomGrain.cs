@@ -1,35 +1,37 @@
-using Orleans;
-using System.Threading.Tasks;
+﻿namespace AdventureGrainInterfaces;
 
-namespace AdventureGrainInterfaces
+/// <summary>
+/// A room is any location in a game, including outdoor locations and
+/// spaces that are arguably better described as moist, cold, caverns.
+/// </summary>
+public interface IRoomGrain : IGrainWithIntegerKey
 {
-    /// <summary>
-    /// A room is any location in a game, including outdoor locations and
-    /// spaces that are arguably better described as moist, cold, caverns.
-    /// </summary>
-    public interface IRoomGrain : IGrainWithIntegerKey
-    {
-        // Rooms have a textual description
-        Task<string> Description(PlayerInfo whoisAsking);
-        Task SetInfo(RoomInfo info);
+    // Rooms have a textual description
+    Task<string> Description(PlayerInfo whoisAsking);
 
-        Task<IRoomGrain> ExitTo(string direction);
+    Task SetInfo(RoomInfo info);
 
-        // Players can enter or exit a room
-        Task Enter(PlayerInfo player);
-        Task Exit(PlayerInfo player);
+    Task<IRoomGrain?> ExitTo(string direction);
 
-        // Players can enter or exit a room
-        Task Enter(MonsterInfo monster);
-        Task Exit(MonsterInfo monster);
+    // Players can enter or exit a room
+    Task Enter(PlayerInfo player);
+    
+    Task Exit(PlayerInfo player);
 
-        // Things can be dropped or taken from a room
-        Task Drop(Thing thing);
-        Task Take(Thing thing);
-        Task<Thing> FindThing(string name);
+    // Monsters can enter or exit a room
+    Task Enter(MonsterInfo monster);
+    
+    Task Exit(MonsterInfo monster);
 
-        // Players and monsters can be killed, if you have the right weapon.
-        Task<PlayerInfo> FindPlayer(string name);
-        Task<MonsterInfo> FindMonster(string name);
-    }
+    // Things can be dropped or taken from a room
+    Task Drop(Thing thing);
+    
+    Task Take(Thing thing);
+    
+    Task<Thing?> FindThing(string name);
+
+    // Players and monsters can be killed, if you have the right weapon.
+    Task<PlayerInfo?> FindPlayer(string name);
+
+    Task<MonsterInfo?> FindMonster(string name);
 }

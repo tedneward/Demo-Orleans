@@ -1,26 +1,23 @@
-using Orleans;
-using System.Threading.Tasks;
+﻿namespace AdventureGrainInterfaces;
 
-namespace AdventureGrainInterfaces
+/// <summary>
+/// A player is, well, there's really no other good name...
+/// </summary>
+public interface IPlayerGrain : IGrainWithGuidKey
 {
-    /// <summary>
-    /// A player is, well, there's really no other good name...
-    /// </summary>
-    public interface IPlayerGrain : IGrainWithGuidKey
-    {
-        // Players have names
-        Task<string> Name();
-        Task SetName(string name);
+    // Players have names
+    Task<string?> Name();
 
-        // Each player is located in exactly one room
-        Task SetRoomGrain(IRoomGrain room);
-        Task<IRoomGrain> RoomGrain();
+    Task SetName(string name);
 
-        // Until Death comes knocking
-        Task Die();
+    // Each player is located in exactly one room
+    Task SetRoomGrain(IRoomGrain room);
+    
+    Task<IRoomGrain> RoomGrain();
 
-        // A Player takes his turn by calling Play with a command
-        Task<string> Play(string command);
+    // Until Death comes knocking
+    Task Die();
 
-    }
+    // A Player takes his turn by calling Play with a command
+    Task<string?> Play(string command);
 }
