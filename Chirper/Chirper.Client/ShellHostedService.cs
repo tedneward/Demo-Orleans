@@ -1,237 +1,285 @@
-using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Text.RegularExpressions;
-using System.Threading;
-using System.Threading.Tasks;
 using Chirper.Grains;
 using Microsoft.Extensions.Hosting;
-using Orleans;
+using Spectre.Console;
 
-namespace Chirper.Client
+namespace Chirper.Client;
+
+public sealed partial class ShellHostedService : BackgroundService
 {
-    public class ShellHostedService : IHostedService
+    private readonly IClusterClient _client;
+    private readonly IHostApplicationLifetime _applicationLifetime;
+
+    private ChirperConsoleViewer? _viewer;
+    private IChirperViewer? _viewerRef;
+    private IChirperAccount? _account;
+
+    public ShellHostedService(IClusterClient client, IHostApplicationLifetime applicationLifetime)
     {
-        private readonly IClusterClient _client;
-        private readonly IHost _host;
-        private IChirperViewer _viewer;
-        private IChirperAccount _account;
-        private Task _execution;
+        _client = client;
+        _applicationLifetime = applicationLifetime;
+    }
 
-        public ShellHostedService(IClusterClient client, IHost host)
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        ShowHelp(true);
+
+        while (!stoppingToken.IsCancellationRequested)
         {
-            _client = client;
-            _host = host;
-        }
-
-        public Task StartAsync(CancellationToken cancellationToken)
-        {
-            _execution = RunAsync();
-            return Task.CompletedTask;
-        }
-
-        public Task StopAsync(CancellationToken cancellationToken)
-        {
-            // as we cannot stop the console by graceful means, there is nothing to do
-            // the host itself will stop the console when it terminates the application
-            return Task.CompletedTask;
-        }
-
-        public async Task RunAsync()
-        {
-            ShowHelp(true);
-
-            while (true)
+            var command = Console.ReadLine();
+            if (command is "/help")
             {
-                var command = Console.ReadLine();
-                if (command == "/help")
+                ShowHelp();
+            }
+            else if (command is null or "/quit")
+            {
+                _applicationLifetime.StopApplication();
+                return;
+            }
+            else if (command.StartsWith("/user "))
+            {
+                if (SetUsernameRegex().Match(command) is { Success: true } match)
                 {
-                    ShowHelp();
-                }
-                else if (command == "/quit")
-                {
-                    await _host.StopAsync();
-                }
-                else if (command.StartsWith("/user "))
-                {
-                    var match = Regex.Match(command, @"/user (?<username>\w{1,100})");
-                    if (match.Success)
-                    {
-                        await Unobserve();
-                        var username = match.Groups["username"].Value;
-                        _account = _client.GetGrain<IChirperAccount>(username);
+                    await Unobserve();
+                    var username = match.Groups["username"].Value;
+                    _account = _client.GetGrain<IChirperAccount>(username);
 
-                        Console.WriteLine($"The current user is now [{username}]");
-                    }
-                    else
-                    {
-                        Console.WriteLine("Invalid username. Try again or type /help for a list of commands.");
-                    }
-                }
-                else if (command.StartsWith("/follow "))
-                {
-                    if (EnsureActiveAccount())
-                    {
-                        var match = Regex.Match(command, @"/follow (?<username>\w{1,100})");
-                        if (match.Success)
-                        {
-                            var targetName = match.Groups["username"].Value;
-                            await _account.FollowUserIdAsync(targetName);
-
-                            Console.WriteLine($"[{_account.GetPrimaryKeyString()}] is now following [{targetName}]");
-                        }
-                        else
-                        {
-                            Console.WriteLine("Invalid target username. Try again or type /help for a list of commands.");
-                        }
-                    }
-                }
-                else if (command == "/following")
-                {
-                    if (EnsureActiveAccount())
-                    {
-                        (await _account.GetFollowingListAsync())
-                            .ForEach(_ => Console.WriteLine(_));
-                    }
-                }
-                else if (command == "/followers")
-                {
-                    if (EnsureActiveAccount())
-                    {
-                        (await _account.GetFollowersListAsync())
-                            .ForEach(_ => Console.WriteLine(_));
-                    }
-                }
-                else if (command == "/observe")
-                {
-                    if (EnsureActiveAccount())
-                    {
-                        if (_viewer == null)
-                        {
-                            _viewer = await _client.CreateObjectReference<IChirperViewer>(new ChirperConsoleViewer(_account.GetPrimaryKeyString()));
-                        }
-
-                        await _account.SubscribeAsync(_viewer);
-
-                        Console.WriteLine($"Now observing [{_account.GetPrimaryKeyString()}]");
-                    }
-                }
-                else if (command == "/unobserve")
-                {
-                    if (EnsureActiveAccount())
-                    {
-                        await Unobserve();
-                    }
-                }
-                else if (command.StartsWith("/unfollow "))
-                {
-                    if (EnsureActiveAccount())
-                    {
-                        var match = Regex.Match(command, @"/unfollow (?<username>\w{1,100})");
-                        if (match.Success)
-                        {
-                            var targetName = match.Groups["username"].Value;
-                            await _account.UnfollowUserIdAsync(targetName);
-
-                            Console.WriteLine($"[{_account.GetPrimaryKeyString()}] is no longer following [{targetName}]");
-                        }
-                        else
-                        {
-                            Console.WriteLine("Invalid target username. Try again or type /help for a list of commands.");
-                        }
-                    }
-                }
-                else if (command.StartsWith("/chirp "))
-                {
-                    if (EnsureActiveAccount())
-                    {
-                        var match = Regex.Match(command, @"/chirp (?<message>.+)");
-                        if (match.Success)
-                        {
-                            var message = match.Groups["message"].Value;
-                            await _account.PublishMessageAsync(message);
-                            Console.WriteLine("Published the new message!");
-                        }
-                        else
-                        {
-                            Console.WriteLine("Invalid chirp. Try again or type /help for a list of commands.");
-                        }
-                    }
-                }
-                else if (command.StartsWith("/pull"))
-                {
-                    if (EnsureActiveAccount())
-                    {
-                        if (command.Length > 5)
-                        {
-                            // There's a number behind the command, e.g, "/pull 10"
-                            var match = Regex.Match(command, @"/pull (?<chirps>\w{1,100})");
-                            var num = 0;
-                            if (Int32.TryParse(match.Groups["chirps"].Value, out num))
-                            {
-                                (await _account.GetReceivedMessagesAsync(num))
-                                    .ForEach(_ => Console.WriteLine(_));
-                            }
-                        }
-                        else
-                        {
-                            (await _account.GetReceivedMessagesAsync(-1))
-                                .ForEach(_ => Console.WriteLine(_));
-                        }
-                    }
-                    else
-                    {
-                        Console.WriteLine("Select an active user to pull messages.");
-                    }
+                    AnsiConsole.MarkupLine("[bold grey][[[/][bold lime]✓[/][bold grey]]][/] The current user is now [navy]{0}[/]", username);
                 }
                 else
                 {
-                    Console.WriteLine("Unknown command. Type /help for list of commands.");
+                    AnsiConsole.MarkupLine("[bold red]Invalid username[/][red].[/] Try again or type [bold fuchsia]/help[/] for a list of commands.");
                 }
             }
-        }
-
-        private bool EnsureActiveAccount()
-        {
-            if (_account == null)
+            else if (command.StartsWith("/follow "))
             {
-                Console.WriteLine("This command requires an active user. Try again or type /help for a list of commands.");
-                return false;
+                if (EnsureActiveAccount(_account))
+                {
+                    if (FollowUsernameRegex().Match(command) is { Success: true } match)
+                    {
+                        var targetName = match.Groups["username"].Value;
+                        await _account.FollowUserIdAsync(targetName);
+                    }
+                    else
+                    {
+                        AnsiConsole.MarkupLine("[bold grey][[[/][bold red]✗[/][bold grey]]][/] [red underline]Invalid target username[/][red].[/] Try again or type [bold fuchsia]/help[/] for a list of commands.");
+                    }
+                }
             }
-            return true;
-        }
-
-        private async Task Unobserve()
-        {
-            if (_viewer != null)
+            else if (command is "/following")
             {
-                await _account.UnsubscribeAsync(_viewer);
+                if (EnsureActiveAccount(_account))
+                {
+                    var following = await _account.GetFollowingListAsync();
+                    AnsiConsole.Write(new Rule($"{_account.GetPrimaryKeyString()}'s followed accounts")
+                    {
+                        Justification = Justify.Center,
+                        Style = Style.Parse("blue")
+                    });
 
-                _viewer = null;
+                    foreach (var account in following)
+                    {
+                        AnsiConsole.MarkupLine("[bold yellow]{0}[/]", account);
+                    }
 
-                Console.WriteLine($"No longer observing [{_account.GetPrimaryKeyString()}]");
+                    AnsiConsole.Write(new Rule
+                    {
+                        Justification = Justify.Center,
+                        Style = Style.Parse("blue")
+                    });
+                }
             }
-        }
-
-        private void ShowHelp(bool title = false)
-        {
-            if (title)
+            else if (command is "/followers")
             {
-                Console.WriteLine();
-                Console.WriteLine("Welcome to the Chirper Sample!");
-                Console.WriteLine("These are the available commands:");
-            }
+                if (EnsureActiveAccount(_account))
+                {
+                    var followers = await _account.GetFollowersListAsync();
+                    AnsiConsole.Write(new Rule($"{_account.GetPrimaryKeyString()}'s followers")
+                    {
+                        Justification = Justify.Center,
+                        Style = Style.Parse("blue")
+                    });
 
-            Console.WriteLine("/help: Shows this list.");
-            Console.WriteLine("/user <username>: Acts as the given account.");
-            Console.WriteLine("/pull {chirpsnum}: Retrieve all (or {chirpsnum}) messages from chirpers this account follows.");
-            Console.WriteLine("/chirp <message>: Publishes a message to the active account.");
-            Console.WriteLine("/follow <username>: Makes the active account follows the given account.");
-            Console.WriteLine("/unfollow <username>: Makes the active account unfollow the given accout.");
-            Console.WriteLine("/following: Lists the accounts that the active account is following.");
-            Console.WriteLine("/followers: Lists the accounts that follow the active account.");
-            Console.WriteLine("/observe: Start receiving real-time activity updates from the active account.");
-            Console.WriteLine("/unobserve: Stop receiving real-time activity updates from the active account.");
-            Console.WriteLine("/quit: Closes this client.");
-            Console.WriteLine();
+                    foreach (var account in followers)
+                    {
+                        AnsiConsole.MarkupLine("[bold yellow]{0}[/]", account);
+                    }
+
+                    AnsiConsole.Write(new Rule
+                    {
+                        Justification = Justify.Center,
+                        Style = Style.Parse("blue")
+                    });
+                }
+            }
+            else if (command is "/observe")
+            {
+                if (EnsureActiveAccount(_account))
+                {
+                    if (_viewerRef is null)
+                    {
+                        _viewer = new ChirperConsoleViewer(_account.GetPrimaryKeyString());
+                        _viewerRef = _client.CreateObjectReference<IChirperViewer>(_viewer);
+                    }
+
+                    await _account.SubscribeAsync(_viewerRef);
+
+                    AnsiConsole.MarkupLine("[bold grey][[[/][bold lime]✓[/][bold grey]]][/] [bold olive]Now observing[/] [navy]{0}[/]", _account.GetPrimaryKeyString());
+                }
+            }
+            else if (command is "/unobserve")
+            {
+                if (EnsureActiveAccount(_account))
+                {
+                    await Unobserve();
+                    AnsiConsole.MarkupLine("[bold grey][[[/][bold lime]✓[/][bold grey]]][/] [bold olive]No longer observing[/] [navy]{0}[/]", _account.GetPrimaryKeyString());
+                }
+            }
+            else if (command.StartsWith("/unfollow "))
+            {
+                if (EnsureActiveAccount(_account))
+                {
+                    if (UnfollowUsernameRegex().Match(command) is { Success: true } match)
+                    {
+                        var targetName = match.Groups["username"].Value;
+                        await _account.UnfollowUserIdAsync(targetName);
+                    }
+                    else
+                    {
+                        AnsiConsole.MarkupLine("[bold grey][[[/][bold red]✗[/][bold grey]]][/] [red underline]Invalid target username[/][red].[/] Try again or type [bold fuchsia]/help[/] for a list of commands.");
+                    }
+                }
+            }
+            else if (command.StartsWith("/chirp "))
+            {
+                if (EnsureActiveAccount(_account))
+                {
+                    if (ChirpMessageRegex().Match(command) is { Success: true } match)
+                    {
+                        var message = match.Groups["message"].Value;
+                        await _account.PublishMessageAsync(message);
+                        AnsiConsole.MarkupLine("[bold grey][[[/][bold lime]✓[/][bold grey]]][/] Published a new message!");
+                    }
+                    else
+                    {
+                        AnsiConsole.MarkupLine("[bold grey][[[/][bold red]✗[/][bold grey]]][/] [red underline]Invalid chirp[/][red].[/] Try again or type [bold fuchsia]/help[/] for a list of commands.");
+                    }
+                }
+            }
+            else
+            {
+                AnsiConsole.MarkupLine("[bold grey][[[/][bold red]✗[/][bold grey]]][/] [red underline]Unknown command[/][red].[/] Type [bold fuchsia]/help[/] for a list of commands.");
+            }
         }
     }
+
+    private static bool EnsureActiveAccount(
+        [NotNullWhen(true)] IChirperAccount? account)
+    {
+        if (account is null)
+        {
+            AnsiConsole.MarkupLine("[bold grey][[[/][bold red]✗[/][bold grey]]][/] This command requires an [red underline]active user[/][red].[/]"
+                + " Set an active user using [bold fuchsia]/fuchsia[/] [aqua]username[/] or type [bold fuchsia]/help[/] for a list of commands.");
+            return false;
+        }
+        return true;
+    }
+
+    private async Task Unobserve()
+    {
+        if (_viewerRef is not null && _account is not null)
+        {
+            await _account.UnsubscribeAsync(_viewerRef);
+
+            _viewerRef = null;
+            _viewer = null;
+        }
+    }
+
+    private static void ShowHelp(bool title = false)
+    {
+        var markup = new Markup("""
+            [bold fuchsia]/help[/]: Shows this [underline green]help[/] text.
+            [bold fuchsia]/user[/] [aqua]<username>[/]: Switches to the specified [underline green]user[/] account.
+            [bold fuchsia]/chirp[/] [aqua]<message>[/]: [underline green]Chirps[/] a [aqua]message[/] from the active account.
+            [bold fuchsia]/follow[/] [aqua]<username>[/]: [underline green]Follows[/] the account with the specified [aqua]username[/].
+            [bold fuchsia]/unfollow[/] [aqua]<username>[/]: [underline green]Unfollows[/] the account with the specified [aqua]username[/].
+            [bold fuchsia]/following[/]: Lists the accounts that the active account is [underline green]following[/].
+            [bold fuchsia]/followers[/]: Lists the accounts [underline green]followers[/] the active account.
+            [bold fuchsia]/observe[/]: [underline green]Start observing[/] the active account.
+            [bold fuchsia]/unobserve[/]: [underline green]Stop observing[/] the active account.
+            [bold fuchsia]/quit[/]: Closes this client.
+            """);
+        if (title)
+        {
+            // ASCII art bird logo (replaces image-based logo to avoid SixLabors.ImageSharp dependency)
+            var logo = new Markup("""
+                [yellow]        ▄▄▄▄▄▄▄        [/]
+                [yellow]     ▄██[/][white]░░░░░░░[/][yellow]██▄     [/]
+                [yellow]   ▄██[/][white]░░░░░░░░░░░[/][yellow]██▄   [/]
+                [yellow]  ██[/][white]░░░░░░░░░░░░░░░[/][yellow]██  [/]
+                [yellow] ██[/][white]░░░░[/][black]●[/][white]░░░░░░░░░░░[/][yellow]██ [/]
+                [yellow]██[/][white]░░░░░░░░░░░░░░░░░░[/][yellow]██[/]
+                [yellow]██[/][white]░░░░░░░░░░░░░░░░░░[/][yellow]██[/]
+                [darkorange]█████████[/][yellow]██[/][white]░░░░░░░░░[/][yellow]██[/]
+                [yellow]██[/][white]░░░░░░░░░░░░░░░░░░[/][yellow]██[/]
+                [yellow] ██[/][white]░░░░░░░░░░░░░░░░[/][yellow]██ [/]
+                [yellow]  ██[/][white]░░░░░░░░░░░░░░[/][yellow]██  [/]
+                [yellow]   ▀██[/][white]░░░░░░░░░░[/][yellow]██▀   [/]
+                [yellow]     ▀██[/][white]░░░░░░[/][yellow]██▀     [/]
+                [yellow]       ▀██████▀       [/]
+                """);
+
+            var table = new Table
+            {
+                Border = TableBorder.None,
+                Expand = true,
+            }.HideHeaders();
+            table.AddColumn(new TableColumn("One"));
+
+            var header = new FigletText("Orleans")
+            {
+                Color = Color.Fuchsia
+            };
+            var header2 = new FigletText("Chirper")
+            {
+                Color = Color.Aqua
+            };
+
+            table.AddColumn(new TableColumn("Two"));
+            var rightTable = new Table()
+                .HideHeaders()
+                .Border(TableBorder.None)
+                .AddColumn(new TableColumn("Content"));
+
+            rightTable.AddRow(header)
+                .AddRow(header2)
+                .AddEmptyRow()
+                .AddEmptyRow()
+                .AddRow(markup);
+
+            table.AddRow(logo, rightTable);
+
+            AnsiConsole.WriteLine();
+            AnsiConsole.Write(table);
+            AnsiConsole.WriteLine();
+        }
+        else
+        {
+            AnsiConsole.Write(markup);
+        }
+    }
+
+    [GeneratedRegex("/user (?<username>\\w{1,100})")]
+    private static partial Regex SetUsernameRegex();
+
+    [GeneratedRegex("/chirp (?<message>.+)")]
+    private static partial Regex ChirpMessageRegex();
+
+    [GeneratedRegex("/unfollow (?<username>\\w{1,100})")]
+    private static partial Regex UnfollowUsernameRegex();
+
+    [GeneratedRegex("/follow (?<username>\\w{1,100})")]
+    private static partial Regex FollowUsernameRegex();
 }

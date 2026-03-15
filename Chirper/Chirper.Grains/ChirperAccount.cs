@@ -1,299 +1,273 @@
-using System;
-using System.Collections.Generic;
 using System.Collections.Immutable;
-using System.Linq;
-using System.Threading.Tasks;
-using Microsoft.Extensions.Logging;
-using Orleans;
-using Orleans.Concurrency;
 using Chirper.Grains.Models;
+using Microsoft.Extensions.Logging;
+using Orleans.Concurrency;
+using Orleans.Runtime;
 
-namespace Chirper.Grains
+namespace Chirper.Grains;
+
+[Reentrant]
+public sealed class ChirperAccount : Grain, IChirperAccount
 {
-    public class ChirperAccountState
+    /// <summary>
+    /// Size for the recently received message cache.
+    /// </summary>
+    private const int ReceivedMessagesCacheSize = 100;
+
+    /// <summary>
+    /// Size for the published message cache.
+    /// </summary>
+    private const int PublishedMessagesCacheSize = 100;
+
+    /// <summary>
+    /// Max length of each chirp.
+    /// </summary>
+    private const int MaxChirpLength = 280;
+
+    /// <summary>
+    /// Holds the transient list of viewers.
+    /// This list is not part of state and will not survive grain deactivation.
+    /// </summary>
+    private readonly HashSet<IChirperViewer> _viewers = new();
+    private readonly ILogger<ChirperAccount> _logger;
+    private readonly IPersistentState<ChirperAccountState> _state;
+
+    /// <summary>
+    /// Allows state writing to happen in the background.
+    /// </summary>
+    private Task? _outstandingWriteStateOperation;
+
+    public ChirperAccount(
+       [PersistentState(stateName: "account", storageName: "AccountState")] IPersistentState<ChirperAccountState> state,
+       ILogger<ChirperAccount> logger)
     {
-        /// <summary>
-        /// The list of publishers who this user is following.
-        /// </summary>
-        public Dictionary<string, IChirperPublisher> Subscriptions { get; set; }
-
-        /// <summary>
-        /// The list of subscribers who are following this user.
-        /// </summary>
-        public Dictionary<string, IChirperSubscriber> Followers { get; set; }
-
-        /// <summary>
-        /// Chirp messages recently received by this user.
-        /// </summary>
-        public Queue<ChirperMessage> RecentReceivedMessages { get; set; }
-
-        /// <summary>
-        /// Chirp messages recently published by this user.
-        /// </summary>
-        public Queue<ChirperMessage> MyPublishedMessages { get; set; }
+        _state = state;
+        _logger = logger;
     }
 
-    [Reentrant]
-    public class ChirperAccount : Grain<ChirperAccountState>, IChirperAccount
+    private static string GrainType => nameof(ChirperAccount);
+    private string GrainKey => this.GetPrimaryKeyString();
+
+    public override Task OnActivateAsync(CancellationToken _)
     {
-        /// <summary>
-        /// Size for the recently received message cache.
-        /// </summary>
-        private const int ReceivedMessagesCacheSize = 100;
+        _logger.LogInformation("{GrainType} {GrainKey} activated.", GrainType, GrainKey);
 
-        /// <summary>
-        /// Size for the published message cache.
-        /// </summary>
-        private const int PublishedMessagesCacheSize = 100;
+        return Task.CompletedTask;
+    }
 
-        /// <summary>
-        /// The category logger.
-        /// </summary>
-        private readonly ILogger<ChirperAccount> logger;
+    public async ValueTask PublishMessageAsync(string message)
+    {
+        var chirp = CreateNewChirpMessage(message);
 
-        /// <summary>
-        /// Allows state writing to happen in the background.
-        /// </summary>
-        private Task outstandingWriteStateOperation;
+        _logger.LogInformation("{GrainType} {GrainKey} publishing new chirp message '{Chirp}'.",
+            GrainType, GrainKey, chirp);
 
-        /// <summary>
-        /// Max length of each chirp.
-        /// </summary>
-        private const int MAX_MESSAGE_LENGTH = 280;
+        _state.State.MyPublishedMessages.Enqueue(chirp);
 
-        /// <summary>
-        /// Holds the transient list of viewers.
-        /// This list is not part of state and will not survive grain deactivation.
-        /// </summary>
-        private readonly HashSet<IChirperViewer> viewers = new HashSet<IChirperViewer>();
-
-        public ChirperAccount(ILogger<ChirperAccount> logger)
+        while (_state.State.MyPublishedMessages.Count > PublishedMessagesCacheSize)
         {
-            this.logger = logger;
+            _state.State.MyPublishedMessages.Dequeue();
         }
 
-        private string GrainType => nameof(ChirperAccount);
-        private string GrainKey => this.GetPrimaryKeyString();
+        await WriteStateAsync();
 
-        #region Grain overrides
+        // notify viewers of new message
+        _logger.LogInformation("{GrainType} {GrainKey} sending new chirp message to {ViewerCount} viewers.",
+            GrainType, GrainKey, _viewers.Count);
 
-        public override Task OnActivateAsync()
+        _viewers.ForEach(_ => _.NewChirp(chirp));
+
+        // notify followers of a new message
+        _logger.LogInformation("{GrainType} {GrainKey} sending new chirp message to {FollowerCount} followers.",
+            GrainType, GrainKey, _state.State.Followers.Count);
+
+        await Task.WhenAll(_state.State.Followers.Values.Select(_ => _.NewChirpAsync(chirp)).ToArray());
+    }
+
+    public ValueTask<ImmutableList<ChirperMessage>> GetReceivedMessagesAsync(int number, int start)
+    {
+        if (start < 0) start = 0;
+        if (start + number > _state.State.RecentReceivedMessages.Count)
         {
-            // initialize state as needed
-            if (this.State.RecentReceivedMessages == null) this.State.RecentReceivedMessages = new Queue<ChirperMessage>(ReceivedMessagesCacheSize);
-            if (this.State.MyPublishedMessages == null) this.State.MyPublishedMessages = new Queue<ChirperMessage>(PublishedMessagesCacheSize);
-            if (this.State.Followers == null) this.State.Followers = new Dictionary<string, IChirperSubscriber>();
-            if (this.State.Subscriptions == null) this.State.Subscriptions = new Dictionary<string, IChirperPublisher>();
-
-            this.logger.LogInformation("{@GrainType} {@GrainKey} activated.", this.GrainType, this.GrainKey);
-
-            return Task.CompletedTask;
+            number = _state.State.RecentReceivedMessages.Count - start;
         }
 
-        #endregion
+        return ValueTask.FromResult(
+            _state.State.RecentReceivedMessages
+                .Skip(start)
+                .Take(number)
+                .ToImmutableList());
+    }
 
-        #region IChirperAccountGrain interface methods
+    public async ValueTask FollowUserIdAsync(string username)
+    {
+        _logger.LogInformation(
+            "{GrainType} {UserName} > FollowUserName({TargetUserName}).",
+            GrainType,
+            GrainKey,
+            username);
 
-        public async Task PublishMessageAsync(string message)
+        var userToFollow = GrainFactory.GetGrain<IChirperPublisher>(username);
+
+        await userToFollow.AddFollowerAsync(GrainKey, this.AsReference<IChirperSubscriber>());
+
+        _state.State.Subscriptions[username] = userToFollow;
+
+        await WriteStateAsync();
+
+        // notify any viewers that a subscription has been added for this user
+        _viewers.ForEach(cv => cv.SubscriptionAdded(username));
+    }
+
+    public async ValueTask UnfollowUserIdAsync(string username)
+    {
+        _logger.LogInformation(
+            "{GrainType} {GrainKey} > UnfollowUserName({TargetUserName}).",
+            GrainType,
+            GrainKey,
+            username);
+
+        // ask the publisher to remove this grain as a follower
+        await GrainFactory.GetGrain<IChirperPublisher>(username)
+            .RemoveFollowerAsync(GrainKey);
+
+        // remove this publisher from the subscriptions list
+        _state.State.Subscriptions.Remove(username);
+
+        // save now
+        await WriteStateAsync();
+
+        // notify event subscribers
+        _viewers.ForEach(cv => cv.SubscriptionRemoved(username));
+    }
+
+    public ValueTask<ImmutableList<string>> GetFollowingListAsync() =>
+        ValueTask.FromResult(_state.State.Subscriptions.Keys.ToImmutableList());
+
+    public ValueTask<ImmutableList<string>> GetFollowersListAsync() =>
+        ValueTask.FromResult(_state.State.Followers.Keys.ToImmutableList());
+
+    public ValueTask SubscribeAsync(IChirperViewer viewer)
+    {
+        _viewers.Add(viewer);
+        return ValueTask.CompletedTask;
+    }
+
+    public ValueTask UnsubscribeAsync(IChirperViewer viewer)
+    {
+        _viewers.Remove(viewer);
+        return ValueTask.CompletedTask;
+    }
+
+    public ValueTask<ImmutableList<ChirperMessage>> GetPublishedMessagesAsync(int number, int start)
+    {
+        if (start < 0) start = 0;
+        if (start + number > _state.State.MyPublishedMessages.Count)
         {
-            var chirp = this.CreateNewChirpMessage(message);
+            number = _state.State.MyPublishedMessages.Count - start;
+        }
+        return ValueTask.FromResult(
+            _state.State.MyPublishedMessages
+                .Skip(start)
+                .Take(number)
+                .ToImmutableList());
+    }
 
-            this.logger.LogInformation("{@GrainType} {@GrainKey} publishing new chirp message '{@Chirp}'.",
-                this.GrainType, this.GrainKey, chirp);
+    public async ValueTask AddFollowerAsync(string username, IChirperSubscriber follower)
+    {
+        _state.State.Followers[username] = follower;
+        await WriteStateAsync();
+        _viewers.ForEach(cv => cv.NewFollower(username));
+    }
 
-            this.State.MyPublishedMessages.Enqueue(chirp);
+    public ValueTask RemoveFollowerAsync(string username)
+    {
+        _state.State.Followers.Remove(username);
+        return WriteStateAsync();
+    }
 
-            while (this.State.MyPublishedMessages.Count > PublishedMessagesCacheSize)
-            {
-                this.State.MyPublishedMessages.Dequeue();
-            }
+    public async Task NewChirpAsync(ChirperMessage chirp)
+    {
+        _logger.LogInformation(
+            "{GrainType} {GrainKey} received chirp message = {Chirp}",
+            GrainType,
+            GrainKey,
+            chirp);
 
-            await this.WriteStateAsync();
+        _state.State.RecentReceivedMessages.Enqueue(chirp);
 
-            // notify viewers of new message
-            this.logger.LogInformation("{@GrainType} {@GrainKey} sending new chirp message to {@ViewerCount} viewers.",
-                this.GrainType, this.GrainKey, this.viewers.Count);
-
-            this.viewers.ForEach(_ => _.NewChirp(chirp));
-
-            // notify followers of a new message
-            this.logger.LogInformation("{@GrainType} {@GrainKey} sending new chirp message to {@FollowerCount} followers.",
-                this.GrainType, this.GrainKey, this.State.Followers.Count);
-
-            await Task.WhenAll(this.State.Followers.Values.Select(_ => _.NewChirpAsync(chirp)).ToArray());
+        // only relevant when not using fixed queue
+        while (_state.State.RecentReceivedMessages.Count > ReceivedMessagesCacheSize) // to keep not more than the max number of messages
+        {
+            _state.State.RecentReceivedMessages.Dequeue();
         }
 
-        public Task<ImmutableList<ChirperMessage>> GetReceivedMessagesAsync(int n, int start)
+        await WriteStateAsync();
+
+        // notify any viewers that a new chirp has been received
+        _logger.LogInformation(
+            "{GrainType} {GrainKey} sending received chirp message to {ViewerCount} viewers",
+            GrainType,
+            GrainKey,
+            _viewers.Count);
+
+        _viewers.ForEach(_ => _.NewChirp(chirp));
+    }
+
+    private ChirperMessage CreateNewChirpMessage(string message) =>
+        new(message, DateTimeOffset.UtcNow, GrainKey);
+
+    // When reentrant grain is doing WriteStateAsync, etag violations are possible due to concurrent writes.
+    // The solution is to serialize and batch writes, and make sure only a single write is outstanding at any moment in time.
+    private async ValueTask WriteStateAsync()
+    {
+        if (_outstandingWriteStateOperation is Task currentWriteStateOperation)
         {
-            if (start < 0) start = 0;
-            if ((start + n) > this.State.RecentReceivedMessages.Count)
-            {
-                n = this.State.RecentReceivedMessages.Count - start;
-            }
-
-            return Task.FromResult(
-                this.State.RecentReceivedMessages.Skip(start).Take(n).ToImmutableList());
-        }
-
-        public async Task FollowUserIdAsync(string username)
-        {
-            this.logger.LogInformation("{@GrainType} {@UserName} > FollowUserName({@TargetUserName}).",
-                this.GrainType, this.GrainKey, username);
-
-            var userToFollow = this.GrainFactory.GetGrain<IChirperPublisher>(username);
-
-            await userToFollow.AddFollowerAsync(this.GrainKey, this.AsReference<IChirperSubscriber>());
-
-            this.State.Subscriptions[username] = userToFollow;
-
-            await this.WriteStateAsync();
-
-            // notify any viewers that a subscription has been added for this user
-            this.viewers.ForEach(_ => _.SubscriptionAdded(username));
-        }
-
-        public async Task UnfollowUserIdAsync(string username)
-        {
-            this.logger.LogInformation("{@GrainType} {@GrainKey} > UnfollowUserName({@TargetUserName}).",
-                this.GrainType, this.GrainKey, username);
-
-            // ask the publisher to remove this grain as a follower
-            await GrainFactory.GetGrain<IChirperPublisher>(username)
-                .RemoveFollowerAsync(this.GrainKey);
-
-            // remove this publisher from the subscriptions list
-            this.State.Subscriptions.Remove(username);
-
-            // save now
-            await this.WriteStateAsync();
-
-            // notify event subscribers
-            this.viewers.ForEach(_ => _.SubscriptionRemoved(username));
-        }
-
-        public Task<ImmutableList<string>> GetFollowingListAsync() => Task.FromResult(this.State.Subscriptions.Keys.ToImmutableList());
-
-        public Task<ImmutableList<string>> GetFollowersListAsync() => Task.FromResult(this.State.Followers.Keys.ToImmutableList());
-
-        public Task SubscribeAsync(IChirperViewer viewer)
-        {
-            this.viewers.Add(viewer);
-            return Task.CompletedTask;
-        }
-
-        public Task UnsubscribeAsync(IChirperViewer viewer)
-        {
-            this.viewers.Remove(viewer);
-            return Task.CompletedTask;
-        }
-
-        #endregion
-
-        #region IChirperPublisher interface methods
-
-        public Task<ImmutableList<ChirperMessage>> GetPublishedMessagesAsync(int n, int start)
-        {
-            if (start < 0) start = 0;
-            if ((start + n) > this.State.MyPublishedMessages.Count) n = this.State.MyPublishedMessages.Count - start;
-            return Task.FromResult(
-                this.State.MyPublishedMessages.Skip(start).Take(n).ToImmutableList());
-        }
-
-        public async Task AddFollowerAsync(string username, IChirperSubscriber follower)
-        {
-            this.State.Followers[username] = follower;
-            await this.WriteStateAsync();
-        }
-
-        public async Task RemoveFollowerAsync(string username)
-        {
-            this.State.Followers.Remove(username);
-            await this.WriteStateAsync();
-        }
-
-        #endregion
-
-        #region IChirperSubscriber notification callback interface
-
-        public async Task NewChirpAsync(ChirperMessage chirp)
-        {
-            this.logger.LogInformation("{@GrainType} {@GrainKey} received chirp message = {@Chirp}",
-                this.GrainType, this.GrainKey, chirp);
-
-            this.State.RecentReceivedMessages.Enqueue(chirp);
-
-            // only relevant when not using fixed queue
-            while (this.State.MyPublishedMessages.Count > PublishedMessagesCacheSize) // to keep not more than the max number of messages
-            {
-                this.State.MyPublishedMessages.Dequeue();
-            }
-
-            await this.WriteStateAsync();
-
-            // notify any viewers that a new chirp has been received
-            this.logger.LogInformation("{@GrainType} {@GrainKey} sending received chirp message to {@ViewerCount} viewers",
-                this.GrainType, this.GrainKey, this.viewers.Count);
-
-            this.viewers.ForEach(_ => _.NewChirp(chirp));
-        }
-
-        #endregion
-
-        private ChirperMessage CreateNewChirpMessage(string message) => new ChirperMessage(message, DateTime.Now, this.GrainKey);
-
-        // When reentrant grain is doing WriteStateAsync, etag violations are possible due to concurrent writes.
-        // The solution is to serialize and batch writes, and make sure only a single write is outstanding at any moment in time.
-        protected override async Task WriteStateAsync()
-        {
-            var currentWriteStateOperation = this.outstandingWriteStateOperation;
-            if (currentWriteStateOperation != null)
-            {
-                try
-                {
-                    // await the outstanding write, but ignore it since it doesn't include our changes
-                    await currentWriteStateOperation;
-                }
-                catch
-                {
-                    // Ignore all errors from this in-flight write operation, since the original caller(s) of it will observe it.
-                }
-                finally
-                {
-                    if (this.outstandingWriteStateOperation == currentWriteStateOperation)
-                    {
-                        // only null out the outstanding operation if it's the same one as the one we awaited, otherwise
-                        // another request might have already done so.
-                        this.outstandingWriteStateOperation = null;
-                    }
-                }
-            }
-
-            if (this.outstandingWriteStateOperation == null)
-            {
-                // If after the initial write is completed, no other request initiated a new write operation, do it now.
-                currentWriteStateOperation = base.WriteStateAsync();
-                this.outstandingWriteStateOperation = currentWriteStateOperation;
-            }
-            else
-            {
-                // If there were many requests enqueued to persist state, there is no reason to enqueue a new write 
-                // operation for each, since any write (after the initial one that we already awaited) will have cumulative
-                // changes including the one requested by our caller. Just await the new outstanding write.
-                currentWriteStateOperation = this.outstandingWriteStateOperation;
-            }
-
             try
             {
+                // await the outstanding write, but ignore it since it doesn't include our changes
                 await currentWriteStateOperation;
+            }
+            catch
+            {
+                // Ignore all errors from this in-flight write operation, since the original caller(s) of it will observe it.
             }
             finally
             {
-                if (this.outstandingWriteStateOperation == currentWriteStateOperation)
+                if (_outstandingWriteStateOperation == currentWriteStateOperation)
                 {
                     // only null out the outstanding operation if it's the same one as the one we awaited, otherwise
                     // another request might have already done so.
-                    this.outstandingWriteStateOperation = null;
+                    _outstandingWriteStateOperation = null;
                 }
+            }
+        }
+
+        if (_outstandingWriteStateOperation is null)
+        {
+            // If after the initial write is completed, no other request initiated a new write operation, do it now.
+            currentWriteStateOperation = _state.WriteStateAsync();
+            _outstandingWriteStateOperation = currentWriteStateOperation;
+        }
+        else
+        {
+            // If there were many requests enqueued to persist state, there is no reason to enqueue a new write 
+            // operation for each, since any write (after the initial one that we already awaited) will have cumulative
+            // changes including the one requested by our caller. Just await the new outstanding write.
+            currentWriteStateOperation = _outstandingWriteStateOperation;
+        }
+
+        try
+        {
+            await currentWriteStateOperation;
+        }
+        finally
+        {
+            if (_outstandingWriteStateOperation == currentWriteStateOperation)
+            {
+                // only null out the outstanding operation if it's the same one as the one we awaited, otherwise
+                // another request might have already done so.
+                _outstandingWriteStateOperation = null;
             }
         }
     }
