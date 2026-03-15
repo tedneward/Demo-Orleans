@@ -2,6 +2,7 @@
 using Microsoft.Extensions.Logging;
 using Orleans.Configuration;
 
+// {{## BEGIN scaffolding ##}}
 try
 {
     var host = await StartSiloAsync();
@@ -17,7 +18,9 @@ catch (Exception ex)
     Console.WriteLine(ex);
     return 1;
 }
+// {{## END scaffolding ##}}
 
+// {{## BEGIN hostsetup ##}}
 static async Task<IHost> StartSiloAsync()
 {
     var builder = new HostBuilder()
@@ -37,3 +40,4 @@ static async Task<IHost> StartSiloAsync()
 
     return host;
 }
+// {{## END hostsetup ##}}

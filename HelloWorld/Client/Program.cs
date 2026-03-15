@@ -5,6 +5,7 @@ using Orleans.Configuration;
 
 using GrainInterfaces;
 
+// {{## BEGIN scaffolding ##}}
 try
 {
     var client = await ConnectClientAsync();
@@ -21,7 +22,9 @@ catch (Exception e)
     Console.ReadKey();
     return 1;
 }
+// {{## END scaffolding ##}}
 
+// {{## BEGIN connecting ##}}
 static async Task<IClusterClient> ConnectClientAsync()
 {
     var host = new HostBuilder()
@@ -41,7 +44,9 @@ static async Task<IClusterClient> ConnectClientAsync()
 
     return host.Services.GetRequiredService<IClusterClient>();
 }
+// {{## END connecting ##}}
 
+// {{## BEGIN calling ##}}
 static async Task DoClientWorkAsync(IClusterClient client)
 {
     var friend = client.GetGrain<IHelloWorld>(0);
@@ -49,3 +54,4 @@ static async Task DoClientWorkAsync(IClusterClient client)
 
     Console.WriteLine($"\n\n{response}\n\n");
 }
+// {{## END calling ##}}
