@@ -1,11 +1,13 @@
-﻿using Microsoft.Extensions.Hosting;
+﻿using System.Xml.Linq;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Orleans.Configuration;
+using Orleans.Dashboard;
 
 // {{## BEGIN scaffolding ##}}
 try
 {
-    var host = await StartSiloAsync();
+    var host = await StartSiloAsync(args);
     Console.WriteLine("\n\n Press Enter to terminate...\n\n");
     Console.ReadLine();
 
@@ -21,7 +23,7 @@ catch (Exception ex)
 // {{## END scaffolding ##}}
 
 // {{## BEGIN hostsetup ##}}
-static async Task<IHost> StartSiloAsync()
+static async Task<IHost> StartSiloAsync(string[] args)
 {
     var builder = new HostBuilder()
         .UseOrleans(c =>
@@ -32,10 +34,14 @@ static async Task<IHost> StartSiloAsync()
                 options.ClusterId = "dev";
                 options.ServiceId = "HelloWorld";
             })
-            .ConfigureLogging(logging => logging.AddConsole());
+            .ConfigureLogging(logging => logging.AddConsole())
+            .AddDashboard();
         });
 
     var host = builder.Build();
+
+    host.MapOrleansDashboard();
+
     await host.StartAsync();
 
     return host;
