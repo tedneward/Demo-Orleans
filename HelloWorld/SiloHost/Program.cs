@@ -40,8 +40,6 @@ static async Task<IHost> StartSiloAsync(string[] args)
 
     var host = builder.Build();
 
-    host.MapOrleansDashboard();
-
     await host.StartAsync();
 
     return host;
